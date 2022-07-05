@@ -123,15 +123,21 @@ class FCOSModule(torch.nn.Module):
 
     def __init__(self, cfg, in_channels):
         super(FCOSModule, self).__init__()
-
+        
+        # 检测头部，用来获取分类、回归以及centerness的预测结果，然后做出预测
         head = FCOSHead(cfg, in_channels)
-
+        
+        # 推理时的后处理模块（NMS）
         box_selector_test = make_fcos_postprocessor(cfg)
-
+        
+        # 训练时计算loss的模块
         loss_evaluator = make_fcos_loss_evaluator(cfg)
+        
         self.head = head
         self.box_selector_test = box_selector_test
         self.loss_evaluator = loss_evaluator
+        
+        # FPN各特征层对应的下采样步长
         self.fpn_strides = cfg.MODEL.FCOS.FPN_STRIDES
 
     def forward(self, images, features, targets=None):
@@ -149,7 +155,12 @@ class FCOSModule(torch.nn.Module):
             losses (dict[Tensor]): the losses for the model during training. During
                 testing, it is an empty dict.
         """
-        box_cls, box_regression, centerness = self.head(features)
+        
+        #下面三项，对应各特征层分类、回归、centerness的预测结果（都是list）
+        #每一项的shape是：（b，num_fg_classes,h_i,w_i）,(b,4,h_i.w_i),(b, 1, h_i, w_i)----i代表第i层特征
+        box_cls, box_regression, centerness = self.head(features)   
+        
+        # 下面是一个list，每项对应特征层中每点再输入图像中对应的位置((x, y)形式)
         locations = self.compute_locations(features)
  
         if self.training:
@@ -165,6 +176,7 @@ class FCOSModule(torch.nn.Module):
             )
 
     def _forward_train(self, locations, box_cls, box_regression, centerness, targets):
+        # 3个loss，均为标量
         loss_box_cls, loss_box_reg, loss_centerness = self.loss_evaluator(
             locations, box_cls, box_regression, centerness, targets
         )
@@ -173,9 +185,11 @@ class FCOSModule(torch.nn.Module):
             "loss_reg": loss_box_reg,
             "loss_centerness": loss_centerness
         }
-        return None, losses
+        return None, losses         # 返回两项是为何下面的_dorward_test()方法返回的形式保持一致
 
     def _forward_test(self, locations, box_cls, box_regression, centerness, image_sizes):
+        
+        # 经过后处理（NMS）筛选后得到的检测框
         boxes = self.box_selector_test(
             locations, box_cls, box_regression, 
             centerness, image_sizes
@@ -183,9 +197,16 @@ class FCOSModule(torch.nn.Module):
         return boxes, {}
 
     def compute_locations(self, features):
+        
+        """
+            分别计算各层特征中每一个点对应在输入图像中的位置
+            参数feature是来自FPN的输出
+        """
         locations = []
         for level, feature in enumerate(features):
+            #当前特征图的高、宽
             h, w = feature.size()[-2:]
+            #计算当前特征图中每一个点在输入图像中对应的位置
             locations_per_level = self.compute_locations_per_level(
                 h, w, self.fpn_strides[level],
                 feature.device
